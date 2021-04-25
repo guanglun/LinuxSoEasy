@@ -224,8 +224,7 @@ static int dwc2_lowlevel_hw_init(struct dwc2_hsotg *hsotg)
 	hsotg->reset = devm_reset_control_get_optional(hsotg->dev, "dwc2");
 	if (IS_ERR(hsotg->reset)) {
 		ret = PTR_ERR(hsotg->reset);
-		dev_err(hsotg->dev, "error getting reset control %d\n", ret);
-		return ret;
+		return dev_err_probe(hsotg->dev, ret, "error getting reset control\n");
 	}
 
 	reset_control_deassert(hsotg->reset);
@@ -233,8 +232,7 @@ static int dwc2_lowlevel_hw_init(struct dwc2_hsotg *hsotg)
 	hsotg->reset_ecc = devm_reset_control_get_optional(hsotg->dev, "dwc2-ecc");
 	if (IS_ERR(hsotg->reset_ecc)) {
 		ret = PTR_ERR(hsotg->reset_ecc);
-		dev_err(hsotg->dev, "error getting reset control for ecc %d\n", ret);
-		return ret;
+		return dev_err_probe(hsotg->dev, ret, "error getting reset control for ecc\n");
 	}
 
 	reset_control_deassert(hsotg->reset_ecc);
@@ -283,8 +281,8 @@ static int dwc2_lowlevel_hw_init(struct dwc2_hsotg *hsotg)
 	/* Clock */
 	hsotg->clk = devm_clk_get_optional(hsotg->dev, "otg");
 	if (IS_ERR(hsotg->clk)) {
-		dev_err(hsotg->dev, "cannot get otg clock\n");
-		return PTR_ERR(hsotg->clk);
+		ret = PTR_ERR(hsotg->clk);
+		return dev_err_probe(hsotg->dev, ret, "cannot get otg clock\n");
 	}
 
 	/* Regulators */
@@ -293,12 +291,9 @@ static int dwc2_lowlevel_hw_init(struct dwc2_hsotg *hsotg)
 
 	ret = devm_regulator_bulk_get(hsotg->dev, ARRAY_SIZE(hsotg->supplies),
 				      hsotg->supplies);
-	if (ret) {
-		if (ret != -EPROBE_DEFER)
-			dev_err(hsotg->dev, "failed to request supplies: %d\n",
-				ret);
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(hsotg->dev, ret, "failed to request supplies\n");
+
 	return 0;
 }
 
@@ -638,6 +633,19 @@ static int __maybe_unused dwc2_suspend(struct device *dev)
 
 	dwc2_drd_suspend(dwc2);
 
+	if (dwc2->params.power_down == DWC2_POWER_DOWN_PARAM_NONE) {
+		/*
+		 * Backup host registers when power_down param is 'none', if
+		 * controller power is disabled.
+		 * This shouldn't be needed, when using other power_down modes.
+		 */
+		ret = dwc2_backup_registers(dwc2);
+		if (ret) {
+			dev_err(dwc2->dev, "backup regs failed %d\n", ret);
+			return ret;
+		}
+	}
+
 	if (dwc2->params.activate_stm_id_vb_detection) {
 		unsigned long flags;
 		u32 ggpio, gotgctl;
@@ -675,6 +683,9 @@ static int __maybe_unused dwc2_suspend(struct device *dev)
 		dwc2->phy_off_for_suspend = true;
 	}
 
+	if (device_may_wakeup(dev) || device_wakeup_path(dev))
+		enable_irq_wake(dwc2->irq);
+
 	return ret;
 }
 
@@ -682,6 +693,9 @@ static int __maybe_unused dwc2_resume(struct device *dev)
 {
 	struct dwc2_hsotg *dwc2 = dev_get_drvdata(dev);
 	int ret = 0;
+
+	if (device_may_wakeup(dev) || device_wakeup_path(dev))
+		disable_irq_wake(dwc2->irq);
 
 	if (dwc2->phy_off_for_suspend && dwc2->ll_hw_enabled) {
 		ret = __dwc2_lowlevel_hw_enable(dwc2);
@@ -715,8 +729,13 @@ static int __maybe_unused dwc2_resume(struct device *dev)
 		spin_unlock_irqrestore(&dwc2->lock, flags);
 	}
 
-	/* Need to restore FORCEDEVMODE/FORCEHOSTMODE */
-	dwc2_force_dr_mode(dwc2);
+	if (dwc2->params.power_down == DWC2_POWER_DOWN_PARAM_NONE) {
+		ret = dwc2_restore_registers(dwc2);
+		if (ret) {
+			dev_err(dwc2->dev, "restore regs failed %d\n", ret);
+			return ret;
+		}
+	}
 
 	dwc2_drd_resume(dwc2);
 

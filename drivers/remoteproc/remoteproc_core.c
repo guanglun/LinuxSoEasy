@@ -37,6 +37,7 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/virtio_ids.h>
 #include <linux/virtio_ring.h>
+#include <linux/of_platform.h>
 #include <asm/byteorder.h>
 #include <linux/platform_device.h>
 
@@ -1687,11 +1688,14 @@ int rproc_trigger_recovery(struct rproc *rproc)
 {
 	const struct firmware *firmware_p;
 	struct device *dev = &rproc->dev;
+	bool detached;
 	int ret;
 
 	ret = mutex_lock_interruptible(&rproc->lock);
 	if (ret)
 		return ret;
+
+	detached = rproc->autonomous && !atomic_read(&rproc->power);
 
 	/* State could have changed before we got the mutex */
 	if (rproc->state != RPROC_CRASHED)
@@ -1699,8 +1703,14 @@ int rproc_trigger_recovery(struct rproc *rproc)
 
 	dev_err(dev, "recovering %s\n", rproc->name);
 
+	if (rproc->autonomous && !detached) {
+		mutex_unlock(&rproc->lock);
+		rproc_shutdown(rproc);
+		return 0;
+	}
+
 	ret = rproc_stop(rproc, true);
-	if (ret)
+	if (ret || detached)
 		goto unlock_mutex;
 
 	/* generate coredump */
@@ -2014,6 +2024,11 @@ int rproc_add(struct rproc *rproc)
 	if (ret < 0)
 		return ret;
 
+	/* add resource manager device */
+	ret = devm_of_platform_populate(dev->parent);
+	if (ret < 0)
+		return ret;
+
 	/*
 	 * Remind ourselves the remote processor has been attached to rather
 	 * than booted by the remoteproc core.  This is important because the
@@ -2296,6 +2311,8 @@ int rproc_del(struct rproc *rproc)
 	mutex_lock(&rproc_list_mutex);
 	list_del_rcu(&rproc->node);
 	mutex_unlock(&rproc_list_mutex);
+
+	of_platform_depopulate(rproc->dev.parent);
 
 	/* Ensure that no readers of rproc_list are still active */
 	synchronize_rcu();

@@ -193,7 +193,16 @@ static const struct stm32_desc_irq stm32mp1_desc_irq[] = {
 	{ .exti = 23, .irq_parent = 72, .chip = &stm32_exti_h_chip_direct },
 	{ .exti = 24, .irq_parent = 95, .chip = &stm32_exti_h_chip_direct },
 	{ .exti = 25, .irq_parent = 107, .chip = &stm32_exti_h_chip_direct },
+	{ .exti = 26, .irq_parent = 37, .chip = &stm32_exti_h_chip_direct },
+	{ .exti = 27, .irq_parent = 38, .chip = &stm32_exti_h_chip_direct },
+	{ .exti = 28, .irq_parent = 39, .chip = &stm32_exti_h_chip_direct },
+	{ .exti = 29, .irq_parent = 71, .chip = &stm32_exti_h_chip_direct },
 	{ .exti = 30, .irq_parent = 52, .chip = &stm32_exti_h_chip_direct },
+	{ .exti = 31, .irq_parent = 53, .chip = &stm32_exti_h_chip_direct },
+	{ .exti = 32, .irq_parent = 82, .chip = &stm32_exti_h_chip_direct },
+	{ .exti = 33, .irq_parent = 83, .chip = &stm32_exti_h_chip_direct },
+	{ .exti = 43, .irq_parent = 75, .chip = &stm32_exti_h_chip_direct },	
+	{ .exti = 44, .irq_parent = 98, .chip = &stm32_exti_h_chip_direct },
 	{ .exti = 47, .irq_parent = 93, .chip = &stm32_exti_h_chip_direct },
 	{ .exti = 48, .irq_parent = 138, .chip = &stm32_exti_h_chip_direct },
 	{ .exti = 50, .irq_parent = 139, .chip = &stm32_exti_h_chip_direct },
@@ -534,6 +543,9 @@ unspinlock:
 unlock:
 	raw_spin_unlock(&chip_data->rlock);
 
+	if (d->parent_data->chip)
+		irq_chip_set_type_parent(d, type);
+
 	return err;
 }
 
@@ -551,6 +563,9 @@ static int stm32_exti_h_set_wake(struct irq_data *d, unsigned int on)
 
 	raw_spin_unlock(&chip_data->rlock);
 
+	if (d->parent_data->chip)
+		irq_chip_set_wake_parent(d, on);
+
 	return 0;
 }
 
@@ -560,7 +575,13 @@ static int stm32_exti_h_set_affinity(struct irq_data *d,
 	if (d->parent_data->chip)
 		return irq_chip_set_affinity_parent(d, dest, force);
 
-	return -EINVAL;
+	return IRQ_SET_MASK_OK_DONE;
+}
+
+static void stm32_exti_h_ack(struct irq_data *d)
+{
+	if (d->parent_data->chip)
+		irq_chip_ack_parent(d);
 }
 
 static int __maybe_unused stm32_exti_h_suspend(void)
@@ -624,6 +645,7 @@ static int stm32_exti_h_retrigger(struct irq_data *d)
 static struct irq_chip stm32_exti_h_chip = {
 	.name			= "stm32-exti-h",
 	.irq_eoi		= stm32_exti_h_eoi,
+	.irq_ack		= stm32_exti_h_ack,
 	.irq_mask		= stm32_exti_h_mask,
 	.irq_unmask		= stm32_exti_h_unmask,
 	.irq_retrigger		= stm32_exti_h_retrigger,
@@ -637,8 +659,8 @@ static struct irq_chip stm32_exti_h_chip_direct = {
 	.name			= "stm32-exti-h-direct",
 	.irq_eoi		= irq_chip_eoi_parent,
 	.irq_ack		= irq_chip_ack_parent,
-	.irq_mask		= irq_chip_mask_parent,
-	.irq_unmask		= irq_chip_unmask_parent,
+	.irq_mask		= stm32_exti_h_mask,
+	.irq_unmask		= stm32_exti_h_unmask,
 	.irq_retrigger		= irq_chip_retrigger_hierarchy,
 	.irq_set_type		= irq_chip_set_type_parent,
 	.irq_set_wake		= stm32_exti_h_set_wake,
@@ -669,14 +691,28 @@ static int stm32_exti_h_domain_alloc(struct irq_domain *dm,
 
 	irq_domain_set_hwirq_and_chip(dm, virq, hwirq, desc->chip,
 				      chip_data);
-	if (desc->irq_parent) {
+	/*
+	 * EXTI 55 to 60 are mapped to PWR interrupt controller.
+	 * The hwirq translation is done diferently than for GIC.
+	 */
+	if (hwirq >= 55 && hwirq <= 60) {
 		p_fwspec.fwnode = dm->parent->fwnode;
-		p_fwspec.param_count = 3;
-		p_fwspec.param[0] = GIC_SPI;
-		p_fwspec.param[1] = desc->irq_parent;
-		p_fwspec.param[2] = IRQ_TYPE_LEVEL_HIGH;
+		p_fwspec.param_count = 2;
+		p_fwspec.param[0] = hwirq - 55;
+		p_fwspec.param[1] = fwspec->param[1];
 
 		return irq_domain_alloc_irqs_parent(dm, virq, 1, &p_fwspec);
+	} else {
+		if (desc->irq_parent) {
+			p_fwspec.fwnode = dm->parent->fwnode;
+			p_fwspec.param_count = 3;
+			p_fwspec.param[0] = GIC_SPI;
+			p_fwspec.param[1] = desc->irq_parent;
+			p_fwspec.param[2] = IRQ_TYPE_LEVEL_HIGH;
+
+			return irq_domain_alloc_irqs_parent(dm, virq, 1,
+							    &p_fwspec);
+		}
 	}
 
 	return 0;
@@ -841,11 +877,12 @@ static int stm32_exti_probe(struct platform_device *pdev)
 {
 	int ret, i;
 	struct device *dev = &pdev->dev;
-	struct device_node *np = dev->of_node;
+	struct device_node *child, *np = dev->of_node;
 	struct irq_domain *parent_domain, *domain;
 	struct stm32_exti_host_data *host_data;
 	const struct stm32_exti_drv_data *drv_data;
 	struct resource *res;
+	u32 nirqs;
 
 	host_data = devm_kzalloc(dev, sizeof(*host_data), GFP_KERNEL);
 	if (!host_data)
@@ -912,6 +949,34 @@ static int stm32_exti_probe(struct platform_device *pdev)
 	ret = devm_add_action_or_reset(dev, stm32_exti_remove_irq, domain);
 	if (ret)
 		return ret;
+
+	for_each_child_of_node(np, child) {
+		parent_domain = irq_find_host(of_irq_find_parent(child));
+		if (!parent_domain) {
+			dev_err(dev, "child interrupt-parent not found\n");
+			return -EINVAL;
+		}
+
+		ret = of_property_read_u32(child, "st,irq-number", &nirqs);
+		if (ret || !nirqs) {
+			dev_err(dev, "Missing or bad irq-number property\n");
+			return -EINVAL;
+		}
+
+		domain = irq_domain_add_hierarchy(parent_domain, 0, nirqs,
+						  child,
+						  &stm32_exti_h_domain_ops,
+						  host_data);
+		if (!domain) {
+			dev_err(dev, "Could not register exti domain\n");
+			return -ENOMEM;
+		}
+
+		ret = devm_add_action_or_reset(dev, stm32_exti_remove_irq,
+					       domain);
+		if (ret)
+			return ret;
+	}
 
 	stm32_exti_h_syscore_init(host_data);
 

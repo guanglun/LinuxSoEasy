@@ -9,9 +9,6 @@ maintainers:
 
 title: STMicroelectronics STM32 USART bindings
 
-allOf:
-  - $ref: rs485.yaml
-
 properties:
   compatible:
     enum:
@@ -50,26 +47,54 @@ properties:
     minItems: 1
     maxItems: 2
 
-  cts-gpios:
-    maxItems: 1
-
-  rts-gpios:
-    maxItems: 1
+# cts-gpios and rts-gpios properties can be used instead of 'uart-has-rtscts'
+# or 'st,hw-flow-ctrl' (deprecated) for making use of any gpio pins for flow
+# control instead of dedicated pins.
+#
+# It should be noted that both cts-gpios/rts-gpios and 'uart-has-rtscts' or
+# 'st,hw-flow-ctrl' (deprecated) properties cannot co-exist in a design.
+  cts-gpios: true
+  rts-gpios: true
 
   wakeup-source: true
 
   rs485-rts-delay: true
+  rs485-rts-delay-ns: true
   rs485-rts-active-low: true
   linux,rs485-enabled-at-boot-time: true
   rs485-rx-during-tx: true
 
-if:
-  required:
-    - st,hw-flow-ctrl
-then:
-  properties:
-    cts-gpios: false
-    rts-gpios: false
+  st,rx-fifo-threshold-bytes:
+    description: RX FIFO threshold configuration in bytes.
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [1, 2, 4, 8, 12, 14, 16]
+    default: 8
+
+  st,tx-fifo-threshold-bytes:
+    description: TX FIFO threshold configuration in bytes.
+      If value is set to 1, TX FIFO threshold is disabled.
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [1, 2, 4, 8, 12, 14, 16]
+    default: 8
+
+allOf:
+  - $ref: rs485.yaml
+
+  - if:
+      required:
+        - st,hw-flow-ctrl
+    then:
+      properties:
+        cts-gpios: false
+        rts-gpios: false
+
+  - if:
+      required:
+        - st,stm32h7-uart
+    then:
+      properties:
+        st,rx-fifo-threshold-bytes: false
+        st,tx-fifo-threshold-bytes: false
 
 required:
   - compatible
@@ -82,6 +107,26 @@ additionalProperties: false
 examples:
   - |
     #include <dt-bindings/clock/stm32mp1-clks.h>
+
+    usart4: serial@40004c00 {
+      compatible = "st,stm32-uart";
+      reg = <0x40004c00 0x400>;
+      interrupts = <52>;
+      clocks = <&clk_pclk1>;
+      pinctrl-names = "default";
+      pinctrl-0 = <&pinctrl_usart4>;
+    };
+
+    usart2: serial@40004400 {
+      compatible = "st,stm32-uart";
+      reg = <0x40004400 0x400>;
+      interrupts = <38>;
+      clocks = <&clk_pclk1>;
+      st,hw-flow-ctrl;
+      pinctrl-names = "default";
+      pinctrl-0 = <&pinctrl_usart2 &pinctrl_usart2_rtscts>;
+    };
+
     usart1: serial@40011000 {
       compatible = "st,stm32-uart";
       reg = <0x40011000 0x400>;

@@ -20,6 +20,13 @@ allOf:
               - st,stm32mp15-i2c
     then:
       properties:
+        i2c-analog-filter: true
+
+        i2c-digital-filter: true
+
+        i2c-digital-filter-width-ns:
+          default: 0
+
         i2c-scl-rising-time-ns:
           default: 25
 
@@ -35,6 +42,11 @@ allOf:
           items:
             minItems: 3
             maxItems: 3
+
+        st,smbus-alert:
+          description: Enable the SMBus-Alert via SMBA pin, note SMBA pin
+                       must also be configured via pinctrl.
+          type: boolean
 
   - if:
       properties:
